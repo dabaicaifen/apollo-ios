@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+public let log = Logger(subsystem: Bundle.main.bundleIdentifier!, category: "com.graphql.urlsession")
 
 /// A class to handle URL Session calls that will support background execution,
 /// but still (mostly) use callbacks for its primary method of communication.
@@ -55,6 +58,10 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   private var hasNotBeenInvalidated: Bool {
     !self.hasBeenInvalidated
   }
+    
+    public weak var backgroundSessionDelegate: (any BackgroundSessionDelegate)?
+    
+    var lastRequest: (req: URLRequest?, com: Completion?)
   
   /// Designated initializer.
   ///
@@ -63,6 +70,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   ///   - callbackQueue: [optional] The `OperationQueue` to tell the URL session to call back to this class on, which will in turn call back to your class. Defaults to `.main`.
   ///   - sessionDescription: [optional] A human-readable string that you can use for debugging purposes.
   public init(sessionConfiguration: URLSessionConfiguration = .default,
+              backgroundSessionDelegate: (any BackgroundSessionDelegate)? = nil,
               callbackQueue: OperationQueue? = .main,
               sessionDescription: String? = nil) {
     super.init()
@@ -98,6 +106,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   ///
   /// - Parameter identifier: The identifier of the task to clear.
   open func clear(task identifier: Int) {
+      log.error("[] clear task \(identifier, privacy: .public)")
     self.$tasks.mutate { _ = $0.removeValue(forKey: identifier) }
   }
   
@@ -105,6 +114,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   ///
   /// Mostly useful for cleanup and/or after invalidation of the `URLSession`.
   open func clearAllTasks() {
+      log.error("[] clearAllTasks")
     guard !self.tasks.isEmpty else {
       // Nothing to clear
       return
@@ -129,9 +139,11 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
                         completion: @escaping Completion) -> URLSessionTask {
     guard self.hasNotBeenInvalidated else {
       completion(.failure(URLSessionClientError.sessionInvalidated))
+        log.error("[] session invalid")
       return URLSessionTask()
     }
-    
+    lastRequest = (request, completion)
+      log.error("[] send request \(request, privacy: .public)")
     let task = self.session.dataTask(with: request)
     task.taskDescription = taskDescription
       
@@ -163,6 +175,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   ///
   /// - Parameter task: The task you wish to cancel.
   open func cancel(task: URLSessionTask) {
+      log.error("[] cancel task \(task.taskIdentifier, privacy: .public)")
     self.clear(task: task.taskIdentifier)
     task.cancel()
   }
@@ -170,6 +183,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   // MARK: - URLSessionDelegate
   
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+      log.error("[] didBecomeInvalidWithError \(error, privacy: .public)")
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
     for task in self.tasks.values {
       task.completionBlock(.failure(finalError))
@@ -190,11 +204,15 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     completionHandler(.performDefaultHandling, nil)
   }
   
-  #if os(iOS) || os(tvOS) || os(watchOS)
+//  #if os(iOS) || os(tvOS) || os(watchOS)
   open func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-    // No default implementation
+      log.error("[] handle background session \(session.sessionDescription ?? "", privacy: .public)")
+      
+      DispatchQueue.main.async {
+          self.backgroundSessionDelegate?.handler?()
+      }
   }
-  #endif
+//  #endif
   
   // MARK: - NSURLSessionTaskDelegate
   
@@ -213,14 +231,35 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   open func urlSession(_ session: URLSession,
                        task: URLSessionTask,
                        didCompleteWithError error: (any Error)?) {
+      log.error("[] didCompleteWithError \(error, privacy: .public)")
+      if let error = error as? NSError {
+          if error.domain == NSURLErrorDomain && error.code == -997 {
+              // Handle lost connection to background transfer service
+              log.error("[] Background transfer service connection lost - will retry")
+              if let req = lastRequest.req, let com = lastRequest.com {
+                  sendRequest(req,
+                              taskDescription: nil,
+                              rawTaskCompletionHandler: nil,
+                              completion: com)
+                  lastRequest = (nil, nil)
+                  return
+              }
+          }
+      }
+      
     defer {
       self.clear(task: task.taskIdentifier)
     }
     
+      lastRequest = (nil, nil)
+      
     guard let taskData = self.tasks[task.taskIdentifier] else {
       // No completion blocks, the task has likely been cancelled. Bail out.
+        log.error("[] no task data")
       return
     }
+      
+      log.error("[] task data found \(taskData.response, privacy: .public)")
     
     let data = taskData.data
     let response = taskData.response
@@ -279,13 +318,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     dataTask: URLSessionDataTask,
     didReceive data: Data
   ) {
+      log.error("[] received data")
     guard dataTask.state != .canceling else {
       // Task is in the process of cancelling, don't bother handling its data.
       return
     }
 
     guard let taskData = self.tasks[dataTask.taskIdentifier] else {
-      assertionFailure("No data found for task \(dataTask.taskIdentifier), cannot append received data")
+      //assertionFailure("No data found for task \(dataTask.taskIdentifier), cannot append received data")
       return
     }
 
@@ -359,4 +399,8 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
       taskData.responseReceived(response: response)
     }
   }
+}
+
+public protocol BackgroundSessionDelegate: AnyObject {
+    var handler: (() -> Void)? { get }
 }

@@ -9,11 +9,8 @@ import PackageDescription
 let package = Package(
   name: "Apollo",
   platforms: [
-    .iOS(.v12),
-    .macOS(.v10_14),
-    .tvOS(.v12),
-    .watchOS(.v5),
-    .visionOS(.v1),
+    .iOS(.v15),
+    .macOS(.v11)
   ],
   products: [
     .library(name: "Apollo", targets: ["Apollo"]),
